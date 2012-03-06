@@ -1,0 +1,246 @@
+#!/bin/sh
+
+#set -x
+
+###
+### set default parameters
+###
+
+REALPATH=$(cd $(dirname $0) && pwd)
+
+MANIFEST_DIR="/etc/puppet"
+PUPPET_ENV="production"
+PUPPET_OPT="--confdir=${MANIFEST_DIR} --modulepath=${MANIFEST_DIR}/modules"
+PUPPET_MASTERHOST="localhost"
+PUPPET_APPLYMODE="apply"
+
+CB_ROOT=/var/cache/pbuilder/base-puppet.cow
+CB_DIST=squeeze
+CB_ARCH=i386
+CB_PROXY=""
+CB_EXTRAPACKAGES=""
+CB_HOSTS="/etc/hosts"
+
+COLOR="true"
+DEBUG=""
+
+DEBUGCOUNT=0
+TRYCOUNT=3
+
+NODE_LIST=`awk '/^node/{sub(/, /,"\nnode "); print }' ${MANIFEST_DIR}/manifests/*.pp | sort`
+
+[ -f ./.cowtesterrc ] && . ./.cowtesterrc
+
+RC_TOTAL=0
+NODE_MAX=`echo $NODE_LIST | wc -w`
+
+###
+### subroutine (common)
+###
+
+_usage() {
+    echo >&2 "Usage: $0 [-cl] [-dmr] [-h NODE_NAME] [-n NODE_NUM]"
+    echo >&2 "  -c   (create) create cowbuilder basepath."
+    echo >&2 "  -l   (list)   list all recognized nodes."
+    echo >&2 "  -d N (debug)  run debug shell after running puppet N times."
+    echo >&2 "  -m   (mono)   desable colorized output."
+    echo >&2 "  -r   (random) choose target host at random."
+    echo >&2 "  -h   (random) choose target host by nodename."
+    echo >&2 "  -n   (random) choose target host by number (shown by -l)."
+    echo >&2 "  -v   (random) make puppet verbose."
+    echo >&2 "  -w   (random) make puppet more verbose."
+    exit 1
+}
+
+_ifdefined() {
+
+    local func_name=$1
+    case `type $func_name | head -1` in
+	*function)
+            $func_name ;;
+    esac
+
+}
+
+_breakpoint() {
+
+    local COUNT=$1
+    if [ "$DEBUGCOUNT" = "$COUNT" -o "$DEBUGCOUNT" = "all" ]; then
+        echo "DEBUG: Entering shell after $COUNT execution. Please exit when you finish debugging." && /bin/bash
+    fi
+
+}
+
+###
+### subroutine (inside)
+###
+
+_cowtester_run_init() {
+
+    [ -f /etc/hosts.cowtester ] && mv /etc/hosts.cowtester /etc/hosts
+    rm -f /dev/initctl
+
+    _ifdefined "setup"
+
+} >/dev/null 2>&1
+
+_cowtester_run_puppet() {
+
+    for TIMES in `seq $TRYCOUNT`
+    do
+        {
+            case $PUPPET_APPLYMODE in
+                apply)
+                    puppet apply --detailed-exitcodes ${DEBUG} --color=${COLOR} \
+		        ${PUPPET_OPT} \
+		        --environment=${PUPPET_ENV} ${MANIFEST_DIR}/manifests/site.pp 2>&1
+                    ;;
+	        daemon)
+                    puppetd --onetime --test --server ${PUPPET_MASTERHOST} --environment ${PUPPET_ENV} ${DEBUG} 2>&1
+                    ;;
+            esac
+            RC=$?
+            RC_TOTAL=`expr $RC_TOTAL + $?`
+        } | sed -e "s/^/Try $TIMES:/" | grep -v 'sestatus'
+
+        _breakpoint $TIMES
+    done
+
+}
+
+_cowtester_run_finalize() {
+
+    find /etc/init.d/ | egrep -v '(\.sh$|\.depend\.|README|\/rc|udev|ifupdown|networking)' | while read IS
+    do
+        if dpkg -L initscripts | grep -qF $IS; then
+            continue
+        else
+            [ -f $IS ] && $IS stop
+        fi
+    done
+
+    _ifdefined "teardown"
+
+} >/dev/null 2>&1
+
+_cowtester_run() {
+    _cowtester_run_init
+    _cowtester_run_puppet
+    _cowtester_run_finalize
+
+    exit $RC_TOTAL
+}
+
+###
+### subroutine (outside)
+###
+
+_cowtester_create() {
+    [ -d ${CB_ROOT} ] && echo "${CB_ROOT} already exists. abort."; exit 1
+    sudo cowbuilder --create --distribution $CB_DIST --architecture $CB_ARCH \
+        --basepath $CB_ROOT --http-proxy $CB_PROXY \
+        --extrapackages "pciutils dmidecode facter ruby puppet eatmydata ${CB_EXTRAPACKAGES}"
+    exit $?
+}
+
+_cowtester_setup() {
+    export NEWHOST=`echo $TEST_NODE | awk -F . '{print $1}'`
+    export NEWDOMAIN=`echo $TEST_NODE | sed -e "s/${NEWHOST}\.//"`
+
+    sudo mkdir -p ${CB_ROOT}/etc/puppet && sudo rm -rf ${CB_ROOT}/etc/puppet/*
+    sudo cp -pR ${MANIFEST_DIR}/* ${CB_ROOT}/etc/puppet
+    sudo mkdir -p ${CB_ROOT}/${REALPATH}
+    sudo cp ${REALPATH}/cowtester ${CB_ROOT}/${REALPATH}/cowtester
+    sudo cp ./.cowtesterrc ${CB_ROOT}/.cowtesterrc
+    sudo cp ${CB_HOSTS} ${CB_ROOT}/etc/hosts.cowtester
+    sudo sh -c "cat >> ${CB_ROOT}/etc/hosts.cowtester <<EOF
+
+`facter ipaddress` ${TEST_NODE} ${NEWHOST}
+127.0.1.1       ${TEST_NODE} ${NEWHOST}
+EOF"
+    sudo sh -c "cat >> ${CB_ROOT}/.cowtesterrc <<EOF
+
+TRYCOUNT=${TRYCOUNT}
+DEBUGCOUNT=${DEBUGCOUNT}
+COLOR=${COLOR}
+DEBUG=${DEBUG}
+PUPPET_APPLYMODE=${PUPPET_APPLYMODE}
+PUPPET_MASTERHOST=${PUPPET_MASTERHOST}
+EOF"
+}
+
+## run test
+# http://mike.marineau.org/blog/code/2007-07-23-giving-chroot-its-own-hostname-chname
+# http://code.google.com/p/chname/source/browse/trunk/chname.c
+_cowtester_runtest() {
+    sudo ${REALPATH}/chname ${TEST_NODE} cowbuilder --execute \
+        --basepath ${CB_ROOT} --extrapackages "ruby puppet eatmydata ${CB_EXTRAPACKAGES}" \
+        ${REALPATH}/cowtester -- -i
+    RC=$?
+    sudo rm -rf ${CB_ROOT}/etc/puppet/*
+}
+
+_randomize_host() {
+    RAND=`echo $(( $( od -vAn -N1 -tu1 < /dev/urandom ) * ${NODE_MAX} / 255))`
+#  TEST_NODE=`echo ${NODE_LIST} | awk "{print \\$$RAND}"`
+    _choose_host $RAND "${NODE_LIST}"
+}
+
+_choose_host() {
+#    TEST_NODE=`echo ${NODE_LIST} | awk "{print \\$$1}"`
+    echo `echo $2 | awk "{print \\$$1}"`
+}
+
+_cowtester_validate() {
+    [ z"${TEST_NODE}" = "z" ] && _usage
+    if echo ${NODE_LIST} | grep -qF "${TEST_NODE}"; then
+        echo "Test Target: ${TEST_NODE} (`basename ${CB_ROOT}`)"
+    else
+        echo "no such node."
+        exit 1
+    fi
+}
+
+_cowtester_pretest() {
+    ${REALPATH}/puppet-lint || exit 1
+    echo "PreTest OK."
+}
+
+_cowtester() {
+    set -e
+    _cowtester_validate
+    _cowtester_setup
+    _cowtester_pretest
+    _cowtester_runtest
+    sudo rm -f ${CB_ROOT}/.cowtesterrc ${CB_ROOT}/etc/hosts.cowtester
+    [ "${PUPPET_APPLYMODE}" = "daemon" ] && sudo puppet cert --clean ${TEST_NODE}
+    exit ${RC}
+}
+
+###
+### main
+###
+
+while getopts "s:d:mrn:h:b:icl" OPT; do
+    case ${OPT} in
+        s) PUPPET_APPLYMODE="daemon"; PUPPET_MASTERHOST="${OPTARG}" ;;
+	d) DEBUGCOUNT="${OPTARG}"; TRYCOUNT=$DEBUGCOUNT ;;
+        m) COLOR="false" ;;
+        h) TEST_NODE="${OPTARG}" ;;
+	r) TEST_NODE=`_randomize_host` ;;
+        n) TEST_NODE=`_choose_host "${OPTARG}" "${NODE_LIST}"` ;;
+	b) CB_ROOT="${OPTARG}" ;;
+        v) DEBUG="--debug" ;;
+        w) DEBUG="--debug --trace" ;;
+        l) echo ${NODE_LIST} | sed -e 's/ /\n/g' | cat -n ; exit 0 ;;
+        \?) _usage ;;           # no return
+        i) _cowtester_run ;;    # no return
+        c) _cowtester_create ;; # no return
+    esac
+done
+shift $(( ${OPTIND} - 1 ))
+
+_cowtester
+
+exit ${RC}
+

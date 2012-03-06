@@ -1,0 +1,70 @@
+#!/bin/sh
+
+MANIFEST_DIR=/etc/puppet
+PUPPET_ENVIRONMENTS="production testing development"
+PUPPET_MODULEDIR="modules services"
+PUPPET_ENV="production"
+
+PUPPET_OPT="--confdir=${MANIFEST_DIR} --modulepath=${MANIFESTDIR}/modules:${MANIFEST_DIR}/services"
+
+_test_templates () {
+    echo -n "checking erb "
+    find $MANIFEST_DIR -type f -name "*.erb" | while read -r f
+    do
+        erb -x -T '-' $f | ruby -c >/dev/null  #ruby -c 2>&1 | sed -e "s,^,$1: ,"'
+        if [ $? = 0 ]; then
+            echo -n "."
+        else
+            echo $f; exit 1
+        fi
+    done
+    if [ $? = 0 ]
+    then
+      echo " OK"
+    else
+      exit 1
+    fi
+}
+
+
+_test_modules () {
+  cd $MANIFEST_DIR
+  for MODULEDIR in $PUPPET_MODULEDIR
+  do
+    ls $MODULEDIR | while read MODULE
+    do
+      echo -n "checking module ($MODULE/$PUPPET_ENV) ... "
+      sudo puppet apply $PUPPET_OPT --environment=$PUPPET_ENV --noop -e "include $MODULE" | grep -v 'notice:' || echo "OK."
+    done
+  done
+}
+
+
+_test_manifest () {
+
+    for PUPPET_ENV in $PUPPET_ENVIRONMENTS
+    do
+        echo -n "checking manifest ($PUPPET_ENV) ... "
+        puppet parser validate $PUPPET_OPT --environment=$PUPPET_ENV $MANIFEST_DIR/manifests/site.pp
+        if [ $? = 0 ]; then
+            echo "OK"
+        else
+            exit 1
+        fi
+    done
+}
+
+case $1 in
+#    module)
+#        _test_modules
+        ;;
+    template)
+        _test_template
+        ;;
+    *)
+	_test_templates
+        _test_manifest
+        ;;
+esac
+
+#puppet  -e 'include font' --modulepath /etc/puppet/modules/ --debug --noop
