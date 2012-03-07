@@ -57,7 +57,7 @@ _test_manifest () {
 case $1 in
 #    module)
 #        _test_modules
-        ;;
+#        ;;
     template)
         _test_template
         ;;

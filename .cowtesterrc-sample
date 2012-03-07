@@ -9,14 +9,14 @@ CB_DIST=squeeze
 CB_ARCH=i386
 #CB_PROXY=http://PROXYSERVER:3142/
 #CB_EXTRAPACKAGES=""
-CB_HOSTS="/etc/puppet/.cowtesterhosts"
+CB_HOSTS="${MANIFEST_DIR}/.cowtesterhosts"
 
 #COLOR="true"
 #DEBUG=""
 
-DEBUGCOUNT=0
 TRYCOUNT=3
 
+CONFLICT_SERVICES=""
 #NODE_LIST=`awk '/^node/{sub(/, /,"\nnode "); print }' ${MANIFEST_DIR}/manifests/*.pp | sort`
 
 # setup() {

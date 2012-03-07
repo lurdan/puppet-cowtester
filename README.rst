@@ -9,7 +9,7 @@ setup
 
 1. compile chname
 
-cowtester heavily depends on `chname'  utility. Following commands
+cowtester heavily depends on 'chname'  utility. Following commands
 will compile it for you.
 
 ::
@@ -42,7 +42,8 @@ Tips, and so on
 eatmydata
 =========
 Cowtester automatically sets eatmydata to extrapackages.
-So, you can use it to speed up cowtester simply adding below to your pbuilderrc.
+So, you can use it simply with installing eatmydata into host and
+adding below to your pbuilderrc.
 
 ::
   if [ -z "$LD_PRELOAD" ]; then
