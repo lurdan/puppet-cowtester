@@ -11,7 +11,7 @@ REALPATH=$(cd $(dirname $0) && pwd)
 MANIFEST_DIR="/etc/puppet"
 PUPPET_ENV="production"
 PUPPET_OPT="--confdir=${MANIFEST_DIR} --modulepath=${MANIFEST_DIR}/modules"
-PUPPET_MASTERHOST="localhost"
+PUPPET_MASTERHOST=`facter fqdn`
 PUPPET_APPLYMODE="apply"
 
 CB_ROOT=/var/cache/pbuilder/base-puppet.cow
@@ -28,7 +28,7 @@ DEBUGCOUNT=0
 TRYCOUNT=3
 
 CONFLICT_SERVICES=""
-NODE_LIST=`awk '/^node/{sub(/, /,"\nnode "); print }' ${MANIFEST_DIR}/manifests/*.pp | sort`
+NODE_LIST=`awk '/^node/{sub(/, /,"\nnode "); print }' ${MANIFEST_DIR}/manifests/*.pp 2>/dev/null | sort`
 
 [ -f ./.cowtesterrc ] && . ./.cowtesterrc
 
@@ -40,8 +40,8 @@ NODE_MAX=`echo ${NODE_LIST} | wc -w`
 ###
 
 _usage() {
-    echo >&2 "Usage: $0 [-cl] [-dmr] [-h NODE_NAME] [-n NODE_NUM]"
-    echo >&2 "  -s X (server)  specify puppetmaster hostname."
+    echo >&2 "Usage: $0 [-cl] [-s] [-dmr] [-h NODE_NAME] [-n NODE_NUM]"
+    echo >&2 "  -s   (server)  run puppet as daemon mode."
     echo >&2 "  -c   (create)  create cowbuilder basepath."
     echo >&2 "  -l   (list)    list all recognized nodes."
     echo >&2 "  -d N (debug)   run debug shell after running puppet N times."
@@ -67,17 +67,17 @@ _ifdefined() {
 
 _control_service() {
     local _ACTION=$1
-	shift
-	local _SERVICES="$*"
+    shift
+    local _SERVICES="$*"
 
     if [ "z${_SERVICES}" != "z" ]; then
-	    for SVC in $@
-	    do
-	        if [ -f /etc/init.d/${SVC} ]; then
-			    /etc/init.d/${SVC} ${_ACTION}
-		    fi
-	    done
-	fi
+	for SVC in $@
+	do
+	    if [ -f /etc/init.d/${SVC} ]; then
+		sudo /etc/init.d/${SVC} ${_ACTION}
+	    fi
+	done
+    fi
 }
 
 
@@ -115,7 +115,8 @@ _cowtester_run_puppet() {
 		        --environment=${PUPPET_ENV} ${MANIFEST_DIR}/manifests/site.pp 2>&1
                     ;;
 	        daemon)
-                    puppetd --onetime --test --server ${PUPPET_MASTERHOST} --environment ${PUPPET_ENV} ${DEBUG} 2>&1
+                    puppetd --onetime --test --server ${PUPPET_MASTERHOST} --environment ${PUPPET_ENV} \
+					   --pluginsync	${DEBUG} 2>&1
                     ;;
             esac
             RC=$?
@@ -130,7 +131,7 @@ _cowtester_run_puppet() {
 _cowtester_run_finalize() {
 	local _EXCLUDE="`dpkg -L initscripts | awk -F / '/init.d\//{print $NF}' | xargs | sed -e 's/ /|/g' -e 's/\./\\./g'`|\.sh$|\.depend\.|README|^rc|udev|ifupdown|networking|console-setup|keyboard-setup"
     local _SERVICES="`ls /etc/init.d/ | egrep -v ${_EXCLUDE}`"
-    
+
 	_control_service stop ${_SERVICES}
 
     _ifdefined "teardown"
@@ -169,9 +170,11 @@ _cowtester_setup() {
     sudo sh -c "cat >> ${CB_ROOT}/etc/hosts.cowtester <<EOF
 
 `facter ipaddress` ${TEST_NODE} ${NEWHOST}
+`facter ipaddress` `facter fqdn`
 127.0.1.1       ${TEST_NODE} ${NEWHOST}
+
 EOF"
-	sudo sh -c "cat ./.cowtesterrc | sed -e \"s|^MANIFEST_DIR=\(.*\)$|MANIFEST_DIR=${MANIFEST_DIR}|\" > ${CB_ROOT}/.cowtesterrc"
+    sudo sh -c "cat ./.cowtesterrc | sed -e \"s|^MANIFEST_DIR=\(.*\)$|MANIFEST_DIR=${MANIFEST_DIR}|\" > ${CB_ROOT}/.cowtesterrc"
     sudo sh -c "cat >> ${CB_ROOT}/.cowtesterrc <<EOF
 
 TRYCOUNT=${TRYCOUNT}
@@ -187,12 +190,12 @@ EOF"
 # http://mike.marineau.org/blog/code/2007-07-23-giving-chroot-its-own-hostname-chname
 # http://code.google.com/p/chname/source/browse/trunk/chname.c
 _cowtester_runtest() {
-	_control_service stop ${CONFLICT_SERVICES}
+    _control_service stop ${CONFLICT_SERVICES}
     sudo ${REALPATH}/chname ${TEST_NODE} cowbuilder --execute \
         --basepath ${CB_ROOT} --extrapackages "ruby puppet eatmydata ${CB_EXTRAPACKAGES}" \
         ${REALPATH}/cowtester -- -i
     RC=$?
-	_control_service start ${CONFLICT_SERVICES}
+    _control_service start ${CONFLICT_SERVICES}
     sudo rm -rf ${CB_ROOT}/${MANIFEST_DIR}/*
     sudo rm -f ${CB_ROOT}/.cowtesterrc ${CB_ROOT}/etc/hosts.cowtester ${CB_ROOT}/${REALPATH}/cowtester
     [ "${PUPPET_APPLYMODE}" = "daemon" ] && sudo puppet cert --clean ${TEST_NODE}
@@ -237,9 +240,9 @@ _cowtester() {
 ### main
 ###
 
-while getopts "s:d:mfrn:h:b:icl" OPT; do
+while getopts "sd:mfrn:h:b:icl" OPT; do
     case ${OPT} in
-        s) PUPPET_APPLYMODE="daemon"; PUPPET_MASTERHOST="${OPTARG}" ;;
+        s) PUPPET_APPLYMODE="daemon" ;;
         d) DEBUGCOUNT="${OPTARG}"; TRYCOUNT=$DEBUGCOUNT ;;
         m) COLOR="false" ;;
         f) _PRETEST="_cowtester_pretest" ;;
@@ -260,4 +263,3 @@ shift $(( ${OPTIND} - 1 ))
 _cowtester
 
 exit ${RC}
-

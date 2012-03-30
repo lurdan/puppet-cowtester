@@ -2,7 +2,6 @@
 MANIFEST_DIR="/etc/puppet"
 PUPPET_ENV="development"
 PUPPET_OPT="--confdir=${MANIFEST_DIR} --modulepath=${MANIFEST_DIR}/modules:${MANIFEST_DIR}/services"
-PUPPET_MASTERHOST=`hostname -f`
 
 CB_ROOT=/var/cache/pbuilder/base-puppet-debian6.cow
 CB_DIST=squeeze
