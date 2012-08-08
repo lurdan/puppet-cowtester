@@ -32,7 +32,6 @@ NODE_LIST=`awk '/^node/{sub(/, /,"\nnode "); print }' ${MANIFEST_DIR}/manifests/
 
 [ -f ./.cowtesterrc ] && . ./.cowtesterrc
 
-RC_TOTAL=0
 NODE_MAX=`echo ${NODE_LIST} | wc -w`
 
 ###
@@ -43,9 +42,10 @@ _usage() {
     echo >&2 "Usage: $0 [-cl] [-s] [-dmr] [-h NODE_NAME] [-n NODE_NUM]"
     echo >&2 "  -s   (server)  run puppet as daemon mode."
     echo >&2 "  -c   (create)  create cowbuilder basepath."
+    echo >&2 "  -b   (base)    specyfy cowbuilder basepath."
     echo >&2 "  -l   (list)    list all recognized nodes."
     echo >&2 "  -d N (debug)   run debug shell after running puppet N times."
-    echo >&2 "  -m   (mono)    desable colorized output."
+    echo >&2 "  -m   (mono)    disable colorized output."
     echo >&2 "  -f   (force)   skip syntax check."
     echo >&2 "  -r   (random)  choose target host at random."
     echo >&2 "  -h X (host)    choose target host by hostname."
@@ -103,36 +103,50 @@ _cowtester_run_init() {
 
 } >/dev/null 2>&1
 
+_cowtester_run_puppet_filter() {
+    sed -e "s/^/Try $TIMES:/" | grep -v 'sestatus'
+}
+
+_cowtester_run_puppet_wrapper() {
+    case $PUPPET_APPLYMODE in
+        apply)
+            puppet apply --detailed-exitcodes ${DEBUG} --color=${COLOR} \
+		${PUPPET_OPT} \
+		--environment=${PUPPET_ENV} ${MANIFEST_DIR}/manifests/site.pp 2>&1
+            RC=$?
+            ;;
+	daemon)
+            puppetd --onetime --test --server ${PUPPET_MASTERHOST} --environment ${PUPPET_ENV} \
+		--detailed-exitcodes --pluginsync --color ${COLOR} ${DEBUG} 2>&1
+	    RC=$?
+            ;;
+    esac
+
+    if [ $RC -gt 3 ]; then
+        RC=1
+    else
+        RC=0
+    fi
+
+    return $RC
+}
+
 _cowtester_run_puppet() {
 
     for TIMES in `seq $TRYCOUNT`
     do
-        {
-            case $PUPPET_APPLYMODE in
-                apply)
-                    puppet apply --detailed-exitcodes ${DEBUG} --color=${COLOR} \
-		        ${PUPPET_OPT} \
-		        --environment=${PUPPET_ENV} ${MANIFEST_DIR}/manifests/site.pp 2>&1
-                    ;;
-	        daemon)
-                    puppetd --onetime --test --server ${PUPPET_MASTERHOST} --environment ${PUPPET_ENV} \
-					   --pluginsync	${DEBUG} 2>&1
-                    ;;
-            esac
-            RC=$?
-            RC_TOTAL=`expr $RC_TOTAL + $?`
-        } | sed -e "s/^/Try $TIMES:/" | grep -v 'sestatus'
-
+        exec 3>&1
+        RC=$({ { _cowtester_run_puppet_wrapper 3>&- 4>&-; echo $? 1>&4 3>&- 4>&-;} | _cowtester_run_puppet_filter 1>&3 3>&- 4>&-; } 4>&1)
         _cowtester_run_breakpoint $TIMES
     done
-
+    return $RC
 }
 
 _cowtester_run_finalize() {
-	local _EXCLUDE="`dpkg -L initscripts | awk -F / '/init.d\//{print $NF}' | xargs | sed -e 's/ /|/g' -e 's/\./\\./g'`|\.sh$|\.depend\.|README|^rc|udev|ifupdown|networking|console-setup|keyboard-setup"
-    local _SERVICES="`ls /etc/init.d/ | egrep -v ${_EXCLUDE}`"
+    local _EXCLUDE="`dpkg -L initscripts | awk -F / '/init.d\//{print $NF}' | xargs | sed -e 's/ /|/g' -e 's/\./\\./g'`|\.sh$|\.depend\.|README|^rc|udev|ifupdown|networking|console-setup|keyboard-setup|single|functions|halt"
+    local _SERVICES="`ls /etc/init.d/ | egrep -v \'${_EXCLUDE}\'`"
 
-	_control_service stop ${_SERVICES}
+    _control_service stop ${_SERVICES}
 
     _ifdefined "teardown"
 
@@ -141,9 +155,10 @@ _cowtester_run_finalize() {
 _cowtester_run() {
     _cowtester_run_init
     _cowtester_run_puppet
+	RC=$?
     _cowtester_run_finalize
 
-    exit $RC_TOTAL
+    exit $RC
 }
 
 ###
@@ -191,14 +206,15 @@ EOF"
 # http://code.google.com/p/chname/source/browse/trunk/chname.c
 _cowtester_runtest() {
     _control_service stop ${CONFLICT_SERVICES}
-    sudo ${REALPATH}/chname ${TEST_NODE} cowbuilder --execute \
+    RC=0
+    ( sudo ${REALPATH}/chname ${TEST_NODE} cowbuilder --execute \
         --basepath ${CB_ROOT} --extrapackages "ruby puppet eatmydata ${CB_EXTRAPACKAGES}" \
-        ${REALPATH}/cowtester -- -i
-    RC=$?
+        ${REALPATH}/cowtester -- -i ) || RC=$?
     _control_service start ${CONFLICT_SERVICES}
     sudo rm -rf ${CB_ROOT}/${MANIFEST_DIR}/*
     sudo rm -f ${CB_ROOT}/.cowtesterrc ${CB_ROOT}/etc/hosts.cowtester ${CB_ROOT}/${REALPATH}/cowtester
-    [ "${PUPPET_APPLYMODE}" = "daemon" ] && sudo puppet cert --clean ${TEST_NODE}
+	[ "${PUPPET_APPLYMODE}" = "daemon" ] && ( _control_service restart puppet; sudo puppet cert --clean ${TEST_NODE} --color ${COLOR} )
+    return $RC
 }
 
 _randomize_host() {
@@ -233,14 +249,14 @@ _cowtester() {
     _cowtester_setup
     ${_PRETEST}
     _cowtester_runtest
-    exit ${RC}
+    return $?
 }
 
 ###
 ### main
 ###
 
-while getopts "sd:mfrn:h:b:icl" OPT; do
+while getopts "sd:mfh:rb:n:vwlic" OPT; do
     case ${OPT} in
         s) PUPPET_APPLYMODE="daemon" ;;
         d) DEBUGCOUNT="${OPTARG}"; TRYCOUNT=$DEBUGCOUNT ;;
@@ -248,8 +264,8 @@ while getopts "sd:mfrn:h:b:icl" OPT; do
         f) _PRETEST="_cowtester_pretest" ;;
         h) TEST_NODE="${OPTARG}" ;;
         r) TEST_NODE=`_randomize_host` ;;
-        n) TEST_NODE=`_choose_host "${OPTARG}" "${NODE_LIST}"` ;;
         b) CB_ROOT="${OPTARG}" ;;
+        n) TEST_NODE=`_choose_host "${OPTARG}" "${NODE_LIST}"` ;;
         v) DEBUG="--debug" ;;
         w) DEBUG="--debug --trace" ;;
         l) echo ${NODE_LIST} | sed -e 's/ /\n/g' | cat -n ; exit 0 ;;
@@ -262,4 +278,4 @@ shift $(( ${OPTIND} - 1 ))
 
 _cowtester
 
-exit ${RC}
+exit $?
